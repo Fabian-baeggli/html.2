@@ -1,0 +1,180 @@
+version: '3.8'
+
+# Explizite Netzwerke definieren
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true  # Nur interne Kommunikation
+
+# Named Volumes für bessere Persistenz
+volumes:
+  mysql_data:
+    driver: local
+  mysql_logs:
+    driver: local
+  app_logs:
+    driver: local
+  uploads:
+    driver: local
+  redis_data:
+    driver: local
+
+services:
+  # Datenbank-Service
+  db:
+    image: mysql:8.0
+    container_name: dating_app_db
+    networks:
+      - backend
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - mysql_logs:/var/log/mysql
+      - ./app/reset_database.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_USER: ${MYSQL_USER:-pi}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-pi}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-dating_app}
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Web-Service
+  web:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Übergibt die URL an das Dockerfile
+        REPO_URL: https://github.com/Fabian-baeggli/tinder.git
+    container_name: dating_app_web
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      - uploads:/var/www/html/app/uploads
+      - app_logs:/var/log/apache2
+    environment:
+      # Datenbank
+      MYSQL_HOST: db
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-dating_app}
+      MYSQL_USER: ${MYSQL_USER:-pi}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-pi}
+      
+      # E-Mail (Mailjet)
+      SMTP_HOST: ${SMTP_HOST:-in-v3.mailjet.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-5daf67ddfb7763d8b01fa8d86551c0e0}
+      SMTP_PASS: ${SMTP_PASS:-837e16eb03a118b72d1c528a5fbba6e0}
+      SMTP_FROM: ${SMTP_FROM:-fabian.baeggli@icloud.com}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-"Dating App"}
+      
+      # PHP-Konfiguration
+      PHP_INI_SCAN_DIR: /usr/local/etc/php/conf.d
+      PHP_MEMORY_LIMIT: 256M
+      PHP_MAX_EXECUTION_TIME: 30
+      
+      # App-spezifisch
+      APP_ENV: ${APP_ENV:-development}
+      APP_DEBUG: ${APP_DEBUG:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health.php"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  # phpMyAdmin für Datenbankverwaltung
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: dating_app_phpmyadmin
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "${PHPMYADMIN_PORT:-8081}:80"
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      PMA_USER: ${MYSQL_USER:-pi}
+      PMA_PASSWORD: ${MYSQL_PASSWORD:-pi}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      UPLOAD_LIMIT: 100M
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # MailHog für E-Mail-Testing (nur in Development)
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: dating_app_mailhog
+    networks:
+      - frontend
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    restart: unless-stopped
+    profiles:
+      - development  # Nur in Development-Modus laden
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # Redis für Caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: dating_app_redis
+    networks:
+      - backend
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    profiles:
+      - production  # Nur in Production-Modus laden
